@@ -2,10 +2,14 @@
 common tests
 """
 import random
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Tuple
+from unittest import TestCase
+from unittest.mock import patch
 
 from simple_di import Provide, Provider, container, inject
-from simple_di.providers import Configuration, Factory, SingletonFactory, Static
+from simple_di.providers import Configuration, Factory, SingletonFactory, Static, ThreadLocalSingletonFactory
+
 
 # Usage
 
@@ -195,33 +199,120 @@ def test_config_fallback() -> None:
     assert func() is None
 
 
-def test_complex_container() -> None:
-    @container
-    class Options:
-        config = Configuration()
+def options_dummy_func() -> None:
+    pass
 
-        @SingletonFactory
-        @staticmethod
-        def metrics(
-            address: str = Provide[config.address], port: int = Provide[config.port]
-        ) -> Tuple[str, int]:
 
-            return (address, port)
+def runtime_dummy_func() -> None:
+    pass
 
-    OPTIONS = Options()
 
-    @container
-    class Runtime:
-        @SingletonFactory
-        @staticmethod
-        def metrics(
-            address: str = Provide[OPTIONS.config.address],
-            port: int = Provide[OPTIONS.config.port],
-        ) -> Tuple[str, int]:
-            return (address, port)
+def singleton_dummy_func() -> None:
+    pass
 
-    RUNTIME = Runtime()
 
-    OPTIONS.config.set(dict(address="a.com", port=100))
-    assert OPTIONS.metrics.get() == ("a.com", 100)
-    assert RUNTIME.metrics.get() == ("a.com", 100)
+def thread_local_singleton_dummy_func() -> None:
+    pass
+
+
+class TestSingletonFactories(TestCase):
+    def test_single_thread(self) -> None:
+        @container
+        class Options:
+            config = Configuration()
+
+            @SingletonFactory
+            @staticmethod
+            def metrics(
+                address: str = Provide[config.address], port: int = Provide[config.port]
+            ) -> Tuple[str, int]:
+                options_dummy_func()
+                return address, port
+
+        OPTIONS = Options()
+
+        @container
+        class Runtime:
+            @SingletonFactory
+            @staticmethod
+            def metrics(
+                address: str = Provide[OPTIONS.config.address],
+                port: int = Provide[OPTIONS.config.port],
+            ) -> Tuple[str, int]:
+                runtime_dummy_func()
+                return address, port
+
+        RUNTIME = Runtime()
+
+        OPTIONS.config.set(dict(address="a.com", port=100))
+
+        with patch('test_common.options_dummy_func') as dummy_func:
+            assert OPTIONS.metrics.get() == ("a.com", 100)
+            self.assertEqual(dummy_func.call_count, 1)
+            assert OPTIONS.metrics.get() == ("a.com", 100)
+            self.assertEqual(dummy_func.call_count, 1)
+
+        with patch('test_common.runtime_dummy_func') as dummy_func:
+            assert RUNTIME.metrics.get() == ("a.com", 100)
+            self.assertEqual(dummy_func.call_count, 1)
+            assert RUNTIME.metrics.get() == ("a.com", 100)
+            self.assertEqual(dummy_func.call_count, 1)
+
+    def test_multi_thread(self) -> None:
+        @container
+        class Options:
+            config = Configuration()
+
+            @SingletonFactory
+            @staticmethod
+            def metrics(
+                    address: str = Provide[config.address], port: int = Provide[config.port]
+            ) -> Tuple[str, int]:
+                singleton_dummy_func()
+                return address, port
+
+            @ThreadLocalSingletonFactory
+            @staticmethod
+            def thread_local_metrics(
+                    address: str = Provide[config.address], port: int = Provide[config.port]
+            ) -> Tuple[str, int]:
+                thread_local_singleton_dummy_func()
+                return address, port
+
+        OPTIONS = Options()
+
+        OPTIONS.config.set(dict(address="a.com", port=100))
+
+        with patch('test_common.singleton_dummy_func') as dummy_func:
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(OPTIONS.metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 1)
+                future = executor.submit(OPTIONS.metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 1)
+
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(OPTIONS.metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 1)
+                future = executor.submit(OPTIONS.metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 1)
+
+        with patch('test_common.thread_local_singleton_dummy_func') as dummy_func:
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(OPTIONS.thread_local_metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 1)
+                future = executor.submit(OPTIONS.thread_local_metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 1)
+
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(OPTIONS.thread_local_metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 2)
+                future = executor.submit(OPTIONS.thread_local_metrics.get)
+                assert future.result() == ("a.com", 100)
+                self.assertEqual(dummy_func.call_count, 2)
